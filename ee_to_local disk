@@ -1,0 +1,46 @@
+import ee, os, requests, re
+
+# --- Auth + init with your EE Cloud Project
+ee.Authenticate()
+ee.Initialize(project='blue-carbon-project-475409')
+
+# --- Project asset root
+folder_path = 'projects/blue-carbon-project-475409/assets'
+
+# --- Only download these (prefix filter)
+name_prefix = 'CHIRPSv2_BantenBox_daily_2024_01_'
+
+# --- Local output folder
+out_dir = 'downloads'
+os.makedirs(out_dir, exist_ok=True)
+
+# --- List assets in the project root
+resp = ee.data.listAssets({'parent': folder_path})
+assets = resp.get('assets', [])
+print(f"Found {len(assets)} assets under {folder_path}")
+
+# --- Filter by name prefix
+targets = [a for a in assets if a['type'] == 'IMAGE' and
+           a['name'].split('/')[-1].startswith(name_prefix)]
+
+print(f"Will download {len(targets)} images matching prefix '{name_prefix}'")
+
+for a in sorted(targets, key=lambda x: x['name']):
+    asset_id = a['name']  # e.g. projects/.../assets/CHIRPSv2_BantenBox_daily_2024_01_01
+    img_name = asset_id.split('/')[-1]
+    out_path = os.path.join(out_dir, f'{img_name}.tif')
+
+    print(f'Downloading {img_name} -> {out_path}')
+
+    img = ee.Image(asset_id)
+    # Request full-res export (adjust scale if you want ~5.5 km ≈ 0.05° ~ 5500 m)
+    url = img.getDownloadURL({'crs': 'EPSG:4326', 'scale': 5000})
+    r = requests.get(url, stream=True)
+    r.raise_for_status()
+    with open(out_path, 'wb') as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    print('  ✅ done')
+
+print('🎉 All requested assets downloaded.')
