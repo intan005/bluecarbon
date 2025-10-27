@@ -1,0 +1,36 @@
+#Java script code for extract and clip January 2024 data from CHIRPS vr 02 (a TIFF per day) using google earth engine:
+
+// 1) Exact area: 106.00E–106.10E, 6°00'S–5°51'S
+var aoi = ee.Geometry.Rectangle([106.00, -6.00, 106.10, -5.85]); // [xmin, ymin, xmax, ymax]
+Map.centerObject(aoi, 11);
+Map.addLayer(aoi, {color: 'red'}, 'Custom area');
+
+// 2) Date range
+var start = '2024-01-01';
+var end   = '2024-02-01';
+
+// 3) CHIRPS v2 daily (mm/day)
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(start, end)
+  .filterBounds(aoi)
+  .select('precipitation');
+
+// Create a server-side list and loop client-side to queue tasks
+var list = chirps.toList(chirps.size());
+var n = list.size().getInfo();  // number of images in Jan 2024
+
+for (var i = 0; i < n; i++) {
+  var img = ee.Image(list.get(i)).clip(aoi);
+  var d = ee.Date(img.get('system:time_start')).format('YYYY_MM_dd').getInfo();
+
+  Export.image.toDrive({
+    image: img,
+    description: 'CHIRPSv2_BantenBox_daily_' + d,
+    region: aoi,
+    scale: 5000,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+}
+
