@@ -1,0 +1,129 @@
+import os
+import re
+import glob
+import rasterio
+import numpy as np
+
+# ---------------- Config ----------------
+INPUT_DIR = r"C:\Users\PLN\PyCharmMiscProject\nc_output"
+OUTPUT_DIR = INPUT_DIR  # change if you want outputs elsewhere
+GLOB_PATTERN = os.path.join(INPUT_DIR, "*.tif")
+OUT_NODATA = -9999.0
+
+# Periods to compute multi-year mean of annual sums.
+# Each tuple is (start_year, end_year) inclusive.
+PERIODS = [
+    (2019, 2024),
+    (2025, 2030),
+]
+# ----------------------------------------
+
+RX_T_INDEX = re.compile(r"_t(\d+)\.tif$", re.IGNORECASE)
+
+
+def find_indexed_files(pattern):
+    """Return list of (index_int, filepath) sorted by index."""
+    found = []
+    for f in glob.glob(pattern):
+        m = RX_T_INDEX.search(os.path.basename(f))
+        if m:
+            found.append((int(m.group(1)), f))
+    if not found:
+        raise RuntimeError(f"No files matching '*_tNNN.tif' found in {os.path.dirname(pattern)}")
+    found.sort(key=lambda x: x[0])
+    return found
+
+
+def read_array(fp):
+    """Read first band as float32 and mask explicit nodata to NaN."""
+    with rasterio.open(fp) as src:
+        arr = src.read(1).astype("float32")
+        nodata = src.nodata
+        if nodata is not None:
+            arr = np.where(arr == nodata, np.nan, arr)
+        # safety: mask extremely large negative sentinel values if present
+        arr = np.where(arr < -1e5, np.nan, arr)
+        meta = src.meta.copy()
+    return arr, meta
+
+
+def write_raster(path, arr, meta, nodata=OUT_NODATA):
+    meta_out = meta.copy()
+    meta_out.update(dtype="float32", count=1, nodata=nodata, compress="lzw")
+    out_arr = np.where(np.isnan(arr), nodata, arr)
+    with rasterio.open(path, "w", **meta_out) as dst:
+        dst.write(out_arr.astype("float32"), 1)
+
+
+def build_annual_sums(indexed_files, base_year=2019):
+    """
+    Build a dict year -> annual_sum_array
+    Annual sum is sum of monthly values in that year using np.nansum.
+    If a pixel has no valid months in that year, the annual value is set to NaN.
+    """
+    annual_acc = {}      # year -> list of arrays (months)
+    meta = None
+
+    for idx, fp in indexed_files:
+        year = base_year + (idx // 12)
+        arr, meta = read_array(fp)
+        annual_acc.setdefault(year, []).append(arr)
+
+    if meta is None:
+        raise RuntimeError("No raster meta found (no files read).")
+
+    annual_sums = {}
+    for year, month_list in annual_acc.items():
+        stack = np.array(month_list)  # n_months_in_year x rows x cols
+        valid_count = np.sum(~np.isnan(stack), axis=0)
+        annual_sum = np.nansum(stack, axis=0)
+        annual_sum[valid_count == 0] = np.nan
+        annual_sums[year] = annual_sum
+
+    return annual_sums, meta
+
+
+def compute_period_mean(annual_sums, years, meta, out_name):
+    """
+    Compute the multi-year mean of annual sums for the given sequence of years.
+    Writes output raster to OUTPUT_DIR/out_name and returns path.
+    """
+    available = [y for y in years if y in annual_sums]
+    if not available:
+        print(f"  WARNING: no annual sums available for years {years}. Skipping {out_name}.")
+        return None
+
+    stack = np.array([annual_sums[y] for y in available])  # n_years x rows x cols
+    valid_years = np.sum(~np.isnan(stack), axis=0)
+    mean_arr = np.nanmean(stack, axis=0)
+    mean_arr[valid_years == 0] = np.nan
+
+    out_path = os.path.join(OUTPUT_DIR, out_name)
+    write_raster(out_path, mean_arr, meta)
+    print(f"Wrote {out_path} (years included: {available})")
+    return out_path
+
+
+def main():
+    print("Scanning for monthly tiff files...")
+    indexed_files = find_indexed_files(GLOB_PATTERN)
+    indices = [idx for idx, _ in indexed_files]
+    paths = [p for _, p in indexed_files]
+    print(f"Found {len(paths)} files, index range {min(indices)}..{max(indices)}")
+
+    # Build annual sums per year
+    annual_sums, meta = build_annual_sums(indexed_files, base_year=2019)
+    years_present = sorted(annual_sums.keys())
+    print(f"Built annual sums for years: {years_present}")
+
+    # For each requested period compute multi-year mean of annual sums
+    for start, end in PERIODS:
+        years = list(range(start, end + 1))
+        out_name = f"ta_annual_mean_{start}_{end}.tif"
+        compute_period_mean(annual_sums, years, meta, out_name)
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
